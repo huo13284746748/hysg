@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PhysiTwin · 数字孪生手势控制台</title>
+    <style>
+        :root { --theme: #ff6600; }
+
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Consolas', 'Courier New', monospace;
+        }
+
+        #canvas-container {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: 1;
+        }
+
+        /* 用于 MediaPipe 输入的视频，隐藏 */
+        #input-video { display: none; }
+
+        /* ========== 赛博朋克 HUD ========== */
+        #ui-layer {
+            position: absolute;
+            top: 20px; left: 20px;
+            z-index: 10;
+            color: rgba(255, 255, 255, 0.85);
+            pointer-events: none;
+            user-select: none;
+            min-width: 260px;
+            background: linear-gradient(135deg, rgba(0,10,20,0.75), rgba(0,0,0,0.55));
+            border: 1px solid var(--theme);
+            border-left: 4px solid var(--theme);
+            box-shadow: 0 0 18px rgba(0,0,0,0.8), inset 0 0 30px rgba(255,255,255,0.03);
+            clip-path: polygon(0 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%);
+            padding: 14px 16px;
+        }
+
+        h1 {
+            margin: 0 0 4px 0;
+            font-size: 1.15rem;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+            color: var(--theme);
+            text-shadow: 0 0 12px var(--theme);
+        }
+
+        .sub {
+            font-size: 0.65rem;
+            letter-spacing: 2px;
+            opacity: 0.5;
+            margin-bottom: 10px;
+        }
+
+        .row {
+            display: flex;
+            align-items: center;
+            font-size: 0.72rem;
+            margin: 3px 0;
+            opacity: 0.9;
+        }
+
+        .dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+            background: #555;
+        }
+        .dot.on  { background: #00ff88; box-shadow: 0 0 8px #00ff88; }
+        .dot.off { background: #ff3355; box-shadow: 0 0 8px #ff3355; }
+
+        .instruction {
+            margin-top: 10px;
+            padding-top: 8px;
+            border-top: 1px dashed rgba(255,255,255,0.2);
+            font-size: 0.7rem;
+            line-height: 1.7;
+            opacity: 0.85;
+        }
+
+        #gesture-status {
+            margin-top: 10px;
+            font-weight: bold;
+            font-size: 0.85rem;
+            color: #00ffcc;
+            text-shadow: 0 0 8px rgba(0,255,204,0.6);
+        }
+
+        #theme-name { color: var(--theme); }
+
+        #loading {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 22px;
+            z-index: 20;
+            text-align: center;
+            letter-spacing: 2px;
+            text-shadow: 0 0 12px var(--theme);
+        }
+
+        #cam-error {
+            position: absolute;
+            bottom: 160px; right: 20px;
+            z-index: 15;
+            width: 220px;
+            font-size: 0.72rem;
+            color: #ff8899;
+            background: rgba(30,0,5,0.8);
+            border: 1px solid #ff3355;
+            padding: 10px;
+            display: none;
+            pointer-events: auto;
+            cursor: pointer;
+        }
+
+        /* 摄像头预览小窗 */
+        #webcam-preview {
+            position: absolute;
+            bottom: 20px; right: 20px;
+            width: 160px; height: 120px;
+            z-index: 10;
+            border: 1px solid var(--theme);
+            box-shadow: 0 0 12px rgba(0,0,0,0.8);
+            opacity: 0.75;
+            transform: scaleX(-1); /* 镜像翻转 */
+            background: #050505;
+        }
+    </style>
+
+    <!-- 1. MediaPipe 依赖 -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <!-- 2. Three.js Import Map -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="loading">PHYSITWIN 神经连接中...<br><span style="font-size:13px; opacity:0.6">请允许摄像头权限</span></div>
+
+    <div id="ui-layer">
+        <h1>PhysiTwin</h1>
+        <div class="sub">DIGITAL TWIN CONSOLE v2.0</div>
+        <div class="row"><span id="ws-dot" class="dot off"></span>WebSocket: <span id="ws-text">&nbsp;连接中...</span></div>
+        <div class="row"><span id="cam-dot" class="dot"></span>摄像头: <span id="cam-text">&nbsp;初始化...</span></div>
+        <div class="row"><span class="dot on"></span>能量主题: <span id="theme-name">&nbsp;赛博橙</span></div>
+        <div class="instruction">
+            ✋ 五指张开 → 相机靠近核心<br>
+            ✊ 握拳 → 相机拉远<br>
+            🔄 手腕倾斜 → 环绕旋转<br>
+            👍 点赞 → 重置视角<br>
+            ✌️ 剪刀手 → 切换能量主题<br>
+            👌 OK → 超新星大爆炸
+        </div>
+        <div id="gesture-status">等待手势...</div>
+    </div>
+
+    <div id="cam-error">⚠ 摄像头不可用，3D 场景仍正常运行。<br>点击此处重试。</div>
+
+    <!-- 隐藏的视频输入 / 预览画布 / 主场景 -->
+    <video id="input-video" playsinline muted></video>
+    <canvas id="webcam-preview" width="160" height="120"></canvas>
+    <div id="canvas-container"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        // ==========================================
+        // 1. 全局配置
+        // ==========================================
+        const CONFIG = {
+            particleCount: 8000,
+            ringParticleCount: 4000,
+            minDistance: 120,
+            maxDistance: 900,
+            defaultDistance: 300,
+            rotationSpeedMultiplier: 0.06,
+            zoomLerp: 0.05
+        };
+
+        const THEMES = [
+            { name: '赛博橙', color: 0xff6600, css: '#ff6600' },
+            { name: '冰川蓝', color: 0x00ccff, css: '#00ccff' },
+            { name: '极客绿', color: 0x00ff66, css: '#00ff66' },
+            { name: '霓虹紫', color: 0xcc44ff, css: '#cc44ff' }
+        ];
+        let themeIndex = 0;
+
+        let scene, camera, renderer, composer, bloomPass;
+        let planetSystem, ringSystem1, ringSystem2;
+        let starfield, waveSystem, waveBase;
+        const explosiveSystems = []; // { points, base:Float32Array, spread:Float32Array }
+        let time = 0;
+
+        // 相机控制状态
+        const cameraState = {
+            radius: CONFIG.defaultDistance,
+            targetRadius: CONFIG.defaultDistance,
+            theta: Math.PI / 2,
+            phi: 0,
+            handRotation: 0,
+            isFist: false,
+            isOpen: false
+        };
+
+        // 超新星爆炸状态
+        const explosion = { phase: 'idle', t: 0, amount: 0 };
+
+        // 手势状态机
+        const GESTURE = { NONE: 'none', OPEN: 'open_palm', FIST: 'fist', THUMB: 'thumbs_up', SCISSORS: 'scissors', OK: 'ok' };
+        let lastRawGesture = GESTURE.NONE;
+        let gestureStableCount = 0;
+        let confirmedGesture = GESTURE.NONE;
+
+        const statusEl = document.getElementById('gesture-status');
+        const loadingEl = document.getElementById('loading');
+        const themeNameEl = document.getElementById('theme-name');
+        const camDot = document.getElementById('cam-dot');
+        const camText = document.getElementById('cam-text');
+        const camErrorEl = document.getElementById('cam-error');
+
+        // ==========================================
+        // 2. WebSocket 客户端（自动重连）
+        // ==========================================
+        const wsDot = document.getElementById('ws-dot');
+        const wsText = document.getElementById('ws-text');
+        let ws = null;
+        let lastWSSend = 0;
+        let wsRetryCount = 0;
+
+        function connectWS() {
+            try { ws = new WebSocket('ws://localhost:8765'); }
+            catch (e) { scheduleReconnect(); return; }
+
+            ws.onopen = () => {
+                wsRetryCount = 0; // 连接成功，重置退避
+                wsDot.className = 'dot on';
+                wsText.textContent = ' 已连接 ws://localhost:8765';
+                console.log('[PhysiTwin] WebSocket 已连接');
+            };
+            ws.onclose = () => {
+                wsDot.className = 'dot off';
+                wsText.textContent = ' 断开，等待重连...';
+                scheduleReconnect();
+            };
+            ws.onerror = () => { try { ws.close(); } catch (e) {} };
+        }
+        // 指数退避：3s → 6s → 12s → ... 封顶 30s，避免后端未启动时控制台被 ERR_CONNECTION_REFUSED 刷屏
+        function scheduleReconnect() {
+            const delay = Math.min(3000 * Math.pow(2, wsRetryCount), 30000);
+            wsRetryCount++;
+            setTimeout(connectWS, delay);
+        }
+
+        function sendAction(payload) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                try { ws.send(JSON.stringify({ ...payload, ts: Date.now() })); } catch (e) {}
+            }
+        }
+        // 节流发送（连续型手势）
+        function sendActionThrottled(payload, interval = 250) {
+            const now = performance.now();
+            if (now - lastWSSend > interval) { lastWSSend = now; sendAction(payload); }
+        }
+        connectWS();
+
+        // ==========================================
+        // 3. Three.js 场景构建
+        // ==========================================
+        function createParticleTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32; canvas.height = 32;
+            const context = canvas.getContext('2d');
+            const gradient = context.createRadialGradient(16, 16, 0, 16, 16, 16);
+            gradient.addColorStop(0, 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.2, 'rgba(255,255,255,0.8)');
+            gradient.addColorStop(0.5, 'rgba(255,255,255,0.2)');
+            gradient.addColorStop(1, 'rgba(0,0,0,0)');
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, 32, 32);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        // 注册可爆炸系统：保存基准位置与每粒子扩散系数
+        function registerExplosive(points) {
+            const base = points.geometry.attributes.position.array.slice();
+            const count = base.length / 3;
+            const spread = new Float32Array(count);
+            for (let i = 0; i < count; i++) spread[i] = 1.5 + Math.random() * 3.5;
+            explosiveSystems.push({ points, base, spread });
+        }
+
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.0005);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 3000);
+            camera.position.set(0, 0, CONFIG.defaultDistance);
+
+            renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            container.appendChild(renderer.domElement);
+
+            // 后期处理：Bloom 泛光
+            const renderScene = new RenderPass(scene, camera);
+            bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+            bloomPass.threshold = 0;
+            bloomPass.strength = 2.0;
+            bloomPass.radius = 0.5;
+
+            composer = new EffectComposer(renderer);
+            composer.addPass(renderScene);
+            composer.addPass(bloomPass);
+
+            const particleTexture = createParticleTexture();
+
+            // --- 粒子星球核心 ---
+            const planetGeo = new THREE.BufferGeometry();
+            const planetPos = [];
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                const u = Math.random(), v = Math.random();
+                const theta = 2 * Math.PI * u;
+                const phi = Math.acos(2 * v - 1);
+                let r = 50;
+                if (Math.random() > 0.8) r = 50 * Math.random(); // 20% 内部填充
+                planetPos.push(
+                    r * Math.sin(phi) * Math.cos(theta),
+                    r * Math.sin(phi) * Math.sin(theta),
+                    r * Math.cos(phi)
+                );
+            }
+            planetGeo.setAttribute('position', new THREE.Float32BufferAttribute(planetPos, 3));
+
+            const planetMat = new THREE.PointsMaterial({
+                color: THEMES[0].color,
+                size: 3,
+                map: particleTexture,
+                transparent: true,
+                opacity: 0.9,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+            planetSystem = new THREE.Points(planetGeo, planetMat);
+            scene.add(planetSystem);
+            registerExplosive(planetSystem);
+
+            // --- 双层反向星环 ---
+            const createRing = (radiusInner, radiusOuter, count, tiltX, tiltZ) => {
+                const geo = new THREE.BufferGeometry();
+                const pos = [];
+                for (let i = 0; i < count; i++) {
+                    const angle = Math.random() * Math.PI * 2;
+                    const r = THREE.MathUtils.lerp(radiusInner, radiusOuter, Math.random());
+                    pos.push(r * Math.cos(angle), (Math.random() - 0.5) * 2, r * Math.sin(angle));
+                }
+                geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+                const mat = new THREE.PointsMaterial({
+                    color: 0xffffff,
+                    size: 2,
+                    map: particleTexture,
+                    transparent: true,
+                    opacity: 0.6,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false
+                });
+                const sys = new THREE.Points(geo, mat);
+                sys.rotation.x = tiltX;
+                sys.rotation.z = tiltZ;
+                return sys;
+            };
+
+            ringSystem1 = createRing(70, 110, CONFIG.ringParticleCount, Math.PI / 3, Math.PI / 6);
+            ringSystem2 = createRing(80, 140, CONFIG.ringParticleCount, -Math.PI / 4, -Math.PI / 8);
+            scene.add(ringSystem1);
+            scene.add(ringSystem2);
+            registerExplosive(ringSystem1);
+            registerExplosive(ringSystem2);
+
+            // --- 星空背景（远景静态星点，不参与爆炸） ---
+            const starGeo = new THREE.BufferGeometry();
+            const starPos = [];
+            for (let i = 0; i < 2000; i++) {
+                const u = Math.random(), v = Math.random();
+                const th = 2 * Math.PI * u, ph = Math.acos(2 * v - 1);
+                const r = 800 + Math.random() * 700;
+                starPos.push(
+                    r * Math.sin(ph) * Math.cos(th),
+                    r * Math.sin(ph) * Math.sin(th),
+                    r * Math.cos(ph)
+                );
+            }
+            starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
+            starfield = new THREE.Points(starGeo, new THREE.PointsMaterial({
+                color: 0x8899ff,
+                size: 1.6,
+                map: particleTexture,
+                transparent: true,
+                opacity: 0.7,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            }));
+            scene.add(starfield);
+
+            // --- 流体粒子波浪（下方能量海，正弦径向波动） ---
+            const waveSide = 60, waveSpan = 400, waveCount = waveSide * waveSide;
+            const wPos = new Float32Array(waveCount * 3);
+            waveBase = new Float32Array(waveCount * 2); // 缓存 x/z，每帧只算 y
+            let wi = 0;
+            for (let ix = 0; ix < waveSide; ix++) {
+                for (let iz = 0; iz < waveSide; iz++) {
+                    const x = (ix / (waveSide - 1) - 0.5) * waveSpan;
+                    const z = (iz / (waveSide - 1) - 0.5) * waveSpan;
+                    waveBase[wi * 2] = x;
+                    waveBase[wi * 2 + 1] = z;
+                    wPos[wi * 3] = x;
+                    wPos[wi * 3 + 1] = -90;
+                    wPos[wi * 3 + 2] = z;
+                    wi++;
+                }
+            }
+            const waveGeo = new THREE.BufferGeometry();
+            waveGeo.setAttribute('position', new THREE.BufferAttribute(wPos, 3));
+            waveSystem = new THREE.Points(waveGeo, new THREE.PointsMaterial({
+                color: THEMES[0].color,
+                size: 2,
+                map: particleTexture,
+                transparent: true,
+                opacity: 0.4,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            }));
+            scene.add(waveSystem);
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                composer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        // ==========================================
+        // 4. 主题切换 / 超新星特效
+        // ==========================================
+        function applyTheme() {
+            const t = THEMES[themeIndex];
+            planetSystem.material.color.setHex(t.color);
+            ringSystem1.material.color.setHex(t.color);
+            ringSystem2.material.color.setHex(0xffffff);
+            if (waveSystem) waveSystem.material.color.setHex(t.color); // 能量海跟随主题
+            document.documentElement.style.setProperty('--theme', t.css);
+            themeNameEl.textContent = ' ' + t.name;
+        }
+
+        function cycleTheme() {
+            themeIndex = (themeIndex + 1) % THEMES.length;
+            applyTheme();
+            sendAction({ type: 'action', gesture: GESTURE.SCISSORS, action: 'theme_change', theme: THEMES[themeIndex].name });
+        }
+
+        function triggerSupernova() {
+            if (explosion.phase !== 'idle') return;
+            explosion.phase = 'out';
+            explosion.t = 0;
+            sendAction({ type: 'action', gesture: GESTURE.OK, action: 'supernova' });
+        }
+
+        const easeOutCubic = x => 1 - Math.pow(1 - x, 3);
+        const easeInOutCubic = x => x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+
+        function updateExplosion(dt) {
+            if (explosion.phase === 'idle') return;
+            const DUR = { out: 0.7, hold: 0.25, back: 1.4 };
+            explosion.t += dt / DUR[explosion.phase];
+
+            if (explosion.phase === 'out') {
+                explosion.amount = easeOutCubic(Math.min(explosion.t, 1));
+                if (explosion.t >= 1) { explosion.phase = 'hold'; explosion.t = 0; }
+            } else if (explosion.phase === 'hold') {
+                explosion.amount = 1;
+                if (explosion.t >= 1) { explosion.phase = 'back'; explosion.t = 0; }
+            } else if (explosion.phase === 'back') {
+                explosion.amount = 1 - easeInOutCubic(Math.min(explosion.t, 1));
+                if (explosion.t >= 1) { explosion.phase = 'idle'; explosion.amount = 0; }
+            }
+
+            const a = explosion.amount;
+            for (const sys of explosiveSystems) {
+                const pos = sys.points.geometry.attributes.position;
+                const arr = pos.array, base = sys.base, sp = sys.spread;
+                for (let i = 0, p = 0; i < sp.length; i++, p += 3) {
+                    const f = 1 + a * sp[i];
+                    arr[p]     = base[p]     * f;
+                    arr[p + 1] = base[p + 1] * f;
+                    arr[p + 2] = base[p + 2] * f;
+                }
+                pos.needsUpdate = true;
+            }
+            bloomPass.strength = 2.0 + a * 4.0; // 爆炸时泛光增强
+        }
+
+        // ==========================================
+        // 5. 动画循环
+        // ==========================================
+        function updateCamera() {
+            // 手腕旋转 → 环绕
+            if (Math.abs(cameraState.handRotation) > 0.1) {
+                cameraState.phi += cameraState.handRotation * CONFIG.rotationSpeedMultiplier;
+                sendActionThrottled({ type: 'rotate', action: 'orbit', dx: cameraState.handRotation });
+            }
+
+            // 缩放目标
+            if (cameraState.isFist) {
+                cameraState.targetRadius = CONFIG.maxDistance;
+                sendActionThrottled({ type: 'gesture', gesture: GESTURE.FIST, action: 'zoom_out' });
+            } else if (cameraState.isOpen) {
+                cameraState.targetRadius = CONFIG.minDistance;
+                sendActionThrottled({ type: 'gesture', gesture: GESTURE.OPEN, action: 'zoom_in' });
+            }
+
+            // 平滑逼近目标距离
+            cameraState.radius += (cameraState.targetRadius - cameraState.radius) * CONFIG.zoomLerp;
+            cameraState.radius = Math.max(CONFIG.minDistance * 0.8, Math.min(cameraState.radius, 2000));
+
+            // 无手势时缓慢自转
+            if (!cameraState.isFist && !cameraState.isOpen && Math.abs(cameraState.handRotation) < 0.1) {
+                cameraState.phi -= 0.001;
+            }
+
+            camera.position.x = cameraState.radius * Math.sin(cameraState.theta) * Math.sin(cameraState.phi);
+            camera.position.y = cameraState.radius * Math.cos(cameraState.theta);
+            camera.position.z = cameraState.radius * Math.sin(cameraState.theta) * Math.cos(cameraState.phi);
+            camera.lookAt(0, 0, 0);
+        }
+
+        let lastFrameTime = performance.now();
+        function animate() {
+            requestAnimationFrame(animate);
+            const now = performance.now();
+            const dt = Math.min((now - lastFrameTime) / 1000, 0.1);
+            lastFrameTime = now;
+
+            time += 0.005;
+            if (planetSystem) planetSystem.rotation.y = time * 0.1;
+            if (ringSystem1) ringSystem1.rotation.z -= 0.002;
+            if (ringSystem2) ringSystem2.rotation.z += 0.003;
+
+            // 流体波浪：径向正弦波 + 轻微横向涌动，能量海起伏
+            if (waveSystem) {
+                const arr = waveSystem.geometry.attributes.position.array;
+                const wt = time * 2.2;
+                for (let i = 0, p = 0; i < waveBase.length; i += 2, p += 3) {
+                    const x = waveBase[i], z = waveBase[i + 1];
+                    const d = Math.sqrt(x * x + z * z);
+                    arr[p + 1] = -90
+                        + Math.sin(d * 0.045 - wt) * 6 * Math.exp(-d * 0.004)
+                        + Math.sin(x * 0.05 + wt * 0.7) * 1.5;
+                }
+                waveSystem.geometry.attributes.position.needsUpdate = true;
+            }
+
+            updateExplosion(dt);
+            updateCamera();
+            composer.render();
+        }
+
+        // ==========================================
+        // 5.5 Web Audio 音效系统（纯代码合成，零音频文件）
+        // ==========================================
+        let audioCtx = null, masterBus = null;
+
+        function ensureAudio() {
+            if (!audioCtx) {
+                try {
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    // 主总线：动态压缩器统一防爆音 + 总音量控制
+                    const comp = audioCtx.createDynamicsCompressor();
+                    masterBus = audioCtx.createGain();
+                    masterBus.gain.value = 0.8;
+                    masterBus.connect(comp).connect(audioCtx.destination);
+                } catch (e) { return null; }
+            }
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            return audioCtx;
+        }
+        // 浏览器自动播放策略：首次交互时激活音频上下文
+        window.addEventListener('pointerdown', ensureAudio);
+        window.addEventListener('keydown', ensureAudio);
+
+        // 节流防抖：同名音效在冷却期内直接丢弃，防止手势抖动导致爆音
+        const sfxCooldown = {};
+        function throttled(name, cooldownMs, fn) {
+            const now = performance.now();
+            if (sfxCooldown[name] && now - sfxCooldown[name] < cooldownMs) return;
+            sfxCooldown[name] = now;
+            fn();
+        }
+
+        // 通用合成器：振荡器音（glideTime 可让滑音快于包络衰减）
+        function tone(freq, dur, { type = 'sine', vol = 0.15, glideTo = null, glideTime = null, delay = 0, attack = 0.01 } = {}) {
+            const ctx = ensureAudio();
+            if (!ctx) return;
+            const t0 = ctx.currentTime + delay;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, t0);
+            if (glideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(glideTo, 1), t0 + (glideTime || dur));
+            gain.gain.setValueAtTime(0.0001, t0);
+            gain.gain.exponentialRampToValueAtTime(vol, t0 + attack); // 快速淡入防爆音
+            gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+            osc.connect(gain).connect(masterBus);
+            osc.start(t0);
+            osc.stop(t0 + dur + 0.1);
+        }
+
+        // 通用合成器：噪声（滤波扫频，支持白噪声 / 棕色噪声）
+        function noise(dur, { vol = 0.3, delay = 0, from = 4000, to = 200, type = 'lowpass', brown = false } = {}) {
+            const ctx = ensureAudio();
+            if (!ctx) return;
+            const t0 = ctx.currentTime + delay;
+            const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
+            const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+            const d = buf.getChannelData(0);
+            if (brown) {
+                // 棕色噪声：对白噪声做泄漏积分，能量集中于低频，听感厚重不刺耳
+                let last = 0;
+                for (let i = 0; i < len; i++) {
+                    last = (last + 0.02 * (Math.random() * 2 - 1)) / 1.02;
+                    d[i] = last * 3.5 * (1 - i / len);
+                }
+            } else {
+                for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+            }
+            const src = ctx.createBufferSource();
+            src.buffer = buf;
+            const filter = ctx.createBiquadFilter();
+            filter.type = type;
+            filter.frequency.setValueAtTime(from, t0);
+            filter.frequency.exponentialRampToValueAtTime(Math.max(to, 20), t0 + dur);
+            const gain = ctx.createGain();
+            gain.gain.setValueAtTime(vol, t0);
+            gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+            src.connect(filter).connect(gain).connect(masterBus);
+            src.start(t0);
+        }
+
+        const SFX = {
+            // ✋ 张开（靠近）：轻快上行滑音 —— 能量聚集感
+            open: () => throttled('open', 500, () => {
+                tone(220, 0.4, { type: 'triangle', vol: 0.10, glideTo: 880 });
+                tone(440, 0.3, { type: 'sine', vol: 0.06, glideTo: 1760, delay: 0.05 });
+            }),
+            // ✊ 握拳（拉远）：低沉沉降重音 —— 引擎反冲感
+            fist: () => throttled('fist', 500, () => {
+                tone(160, 0.45, { type: 'sine', vol: 0.30, glideTo: 45 });
+                noise(0.25, { vol: 0.14, from: 600, to: 80 });
+            }),
+            // ✌️ 剪刀手（切颜色）：清脆干净的电子确认音 —— 叮咚
+            theme: () => throttled('theme', 350, () => {
+                tone(1046, 0.12, { type: 'sine', vol: 0.12 });
+                tone(1568, 0.22, { type: 'sine', vol: 0.12, delay: 0.09 });
+            }),
+            // 👌 OK（大爆炸）：深空低频冲击 + 棕色噪声能量漫延（电影级，无气枪感）
+            boom: () => throttled('boom', 1200, () => {
+                // Sub-bass：120Hz 在 0.8s 内指数降至 20Hz，包络延续 1.4s —— 前压强烈、尾音低沉漫长
+                tone(120, 1.4, { type: 'sine', vol: 0.45, glideTo: 20, glideTime: 0.8, attack: 0.005 });
+                // 棕色噪声冲击波：低通 1500Hz → 80Hz 扫频，模拟能量在太空中扩散、高频被吸收
+                noise(1.5, { vol: 0.30, from: 1500, to: 80, brown: true });
+            }),
+            // 👍 点赞（重置视角）：纯五度 + 高八度，和谐复位提示音
+            reset: () => throttled('reset', 500, () => {
+                tone(523, 0.35, { type: 'sine', vol: 0.10 });
+                tone(784, 0.35, { type: 'sine', vol: 0.10, delay: 0.02 });
+                tone(1046, 0.45, { type: 'sine', vol: 0.07, delay: 0.12 });
+            })
+        };
+
+        // ==========================================
+        // 6. 手势识别状态机
+        // ==========================================
+        const distSq = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+
+        function classifyGesture(lm) {
+            const wrist = lm[0];
+            // 四指：用 PIP 关节（而非 MCP）判定折叠，抗误检更强
+            // 伸展时指尖明显比 PIP 离手腕更远；半弯曲也不会误判为折叠
+            const tips = [8, 12, 16, 20], pips = [6, 10, 14, 18];
+            const folded = [false, false, false, false];
+            let foldedCount = 0;
+            for (let i = 0; i < 4; i++) {
+                folded[i] = distSq(lm[tips[i]], wrist) < distSq(lm[pips[i]], wrist);
+                if (folded[i]) foldedCount++;
+            }
+            // 拇指：指尖(4)相对掌根(17)比指节(3)更远 → 伸展
+            const thumbExtended = distSq(lm[4], lm[17]) > distSq(lm[3], lm[17]);
+            // 点赞方向校验：拇指尖必须明显高于拇指根（图像坐标 y 向上为负）
+            const thumbUp = lm[4].y < lm[2].y - 0.03;
+
+            // 拇指食指是否相接（按手大小归一化阈值）
+            const handSize = Math.sqrt(distSq(lm[0], lm[9])) + 1e-6;
+            const pinchDist = Math.sqrt(distSq(lm[4], lm[8])) / handSize;
+
+            // 优先级：OK > 点赞 > 剪刀手 > 握拳 > 张开
+            if (pinchDist < 0.35 && !folded[1] && !folded[2] && !folded[3]) return GESTURE.OK;
+            if (thumbExtended && thumbUp && foldedCount === 4) return GESTURE.THUMB;
+            if (!folded[0] && !folded[1] && folded[2] && folded[3]) return GESTURE.SCISSORS;
+            if (foldedCount >= 3) return GESTURE.FIST;
+            if (foldedCount === 0) return GESTURE.OPEN;
+            return GESTURE.NONE;
+        }
+
+        function onGestureConfirmed(g) {
+            switch (g) {
+                case GESTURE.THUMB:
+                    cameraState.targetRadius = CONFIG.defaultDistance;
+                    cameraState.theta = Math.PI / 2;
+                    statusEl.textContent = '状态: 👍 点赞 (重置视角)';
+                    statusEl.style.color = '#ffcc00';
+                    SFX.reset();
+                    sendAction({ type: 'action', gesture: g, action: 'reset_camera' });
+                    break;
+                case GESTURE.SCISSORS:
+                    statusEl.textContent = '状态: ✌️ 剪刀手 (切换主题)';
+                    statusEl.style.color = '#ff66ff';
+                    SFX.theme();
+                    cycleTheme();
+                    break;
+                case GESTURE.OK:
+                    statusEl.textContent = '状态: 👌 OK (超新星爆发!)';
+                    statusEl.style.color = '#ffffff';
+                    SFX.boom();
+                    triggerSupernova();
+                    break;
+                case GESTURE.FIST:
+                    SFX.fist();
+                    break;
+                case GESTURE.OPEN:
+                    SFX.open();
+                    break;
+            }
+        }
+
+        function updateGestureState(lm) {
+            const raw = classifyGesture(lm);
+
+            // 消抖：连续 3 帧一致才确认
+            if (raw === lastRawGesture) gestureStableCount++;
+            else { gestureStableCount = 0; lastRawGesture = raw; }
+
+            if (gestureStableCount >= 3 && raw !== confirmedGesture) {
+                confirmedGesture = raw;
+                onGestureConfirmed(raw);
+            }
+
+            // 连续型状态每帧刷新
+            cameraState.isFist = confirmedGesture === GESTURE.FIST;
+            cameraState.isOpen = confirmedGesture === GESTURE.OPEN;
+
+            if (confirmedGesture === GESTURE.FIST) {
+                statusEl.textContent = '状态: ✊ 握拳 (拉远)';
+                statusEl.style.color = '#ff4444';
+            } else if (confirmedGesture === GESTURE.OPEN) {
+                statusEl.textContent = '状态: ✋ 张开 (靠近)';
+                statusEl.style.color = '#44ff44';
+            } else if (confirmedGesture === GESTURE.NONE) {
+                statusEl.textContent = '状态: 🔄 旋转控制中';
+                statusEl.style.color = '#00ffcc';
+            }
+        }
+
+        // ==========================================
+        // 7. MediaPipe Hands
+        // ==========================================
+        const previewCanvas = document.getElementById('webcam-preview');
+        const previewCtx = previewCanvas.getContext('2d');
+        let hands = null;
+
+        function onResults(results) {
+            previewCtx.save();
+            previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+            previewCtx.drawImage(results.image, 0, 0, previewCanvas.width, previewCanvas.height);
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                drawConnectors(previewCtx, landmarks, HAND_CONNECTIONS, { color: '#00FF00', lineWidth: 1 });
+                drawLandmarks(previewCtx, landmarks, { color: '#FF3333', lineWidth: 1, radius: 2 });
+
+                // 手腕倾斜 → 旋转量（手腕0 与 中指根9 的 dx）
+                const dx = landmarks[9].x - landmarks[0].x;
+                // EMA 平滑：抑制单帧抖动，环绕更线性
+                cameraState.handRotation += (dx * -5.0 - cameraState.handRotation) * 0.25;
+
+                updateGestureState(landmarks);
+            } else {
+                cameraState.handRotation = 0;
+                cameraState.isFist = false;
+                cameraState.isOpen = false;
+                confirmedGesture = GESTURE.NONE;
+                lastRawGesture = GESTURE.NONE;
+                statusEl.textContent = '未检测到手';
+                statusEl.style.color = '#888';
+            }
+            previewCtx.restore();
+        }
+
+        // ==========================================
+        // 8. 高兼容性摄像头启动（不硬编码分辨率）
+        // ==========================================
+        async function startCameraStream() {
+            const videoElement = document.getElementById('input-video');
+            // 最兼容写法：不指定任何约束，让浏览器/驱动自行协商
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            videoElement.srcObject = stream;
+            await videoElement.play();
+            return videoElement;
+        }
+
+        function pumpFrames(videoElement) {
+            const loop = async () => {
+                if (videoElement.readyState >= 2 && hands) {
+                    try { await hands.send({ image: videoElement }); } catch (e) {}
+                }
+                requestAnimationFrame(loop);
+            };
+            loop();
+        }
+
+        async function initMediaPipe(retriesLeft = 2) {
+            camDot.className = 'dot';
+            camText.textContent = ' 初始化...';
+            camErrorEl.style.display = 'none';
+
+            try {
+                hands = new window.Hands({
+                    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+                });
+                hands.setOptions({
+                    maxNumHands: 1,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                });
+                hands.onResults(onResults);
+
+                const videoElement = await startCameraStream();
+                pumpFrames(videoElement);
+
+                camDot.className = 'dot on';
+                camText.textContent = ' 在线';
+                loadingEl.style.display = 'none';
+            } catch (err) {
+                console.warn('摄像头启动失败:', err);
+                let reason = '未知错误';
+                if (err && err.name === 'NotFoundError') reason = '未检测到摄像头设备';
+                else if (err && err.name === 'NotAllowedError') reason = '摄像头权限被拒绝';
+                else if (err && err.name === 'NotReadableError') reason = '摄像头被其他程序占用';
+                else if (err && err.message) reason = err.message;
+
+                if (retriesLeft > 0) {
+                    camText.textContent = ` 重试中(${reason})...`;
+                    setTimeout(() => initMediaPipe(retriesLeft - 1), 2000);
+                } else {
+                    // 放弃但不崩溃：3D 场景继续运行
+                    camDot.className = 'dot off';
+                    camText.textContent = ' 离线';
+                    loadingEl.style.display = 'none';
+                    camErrorEl.innerHTML = `⚠ ${reason}。手势功能不可用，3D 场景仍正常运行。<br><b>点击此处重试</b>`;
+                    camErrorEl.style.display = 'block';
+                }
+            }
+        }
+        camErrorEl.addEventListener('click', () => initMediaPipe(2));
+
+        // ==========================================
+        // 启动
+        // ==========================================
+        initThree();
+        applyTheme();
+        animate();
+        setTimeout(() => initMediaPipe(2), 800);
+    </script>
+</body>
+</html>
